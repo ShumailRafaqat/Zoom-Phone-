@@ -334,6 +334,13 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
     yellow = PatternFill("solid", fgColor="FFEB9C")
     green = PatternFill("solid", fgColor="C6EFCE")
     orange = PatternFill("solid", fgColor="FCE4D6")
+
+    # Unusual Calling Time colors (All Calls Detail only)
+    yellow_light = PatternFill("solid", fgColor="FFF2CC")   # < 3 min
+    soft_pink    = PatternFill("solid", fgColor="E8A0A8")   # > 3 min (thora dark)
+    magenta      = PatternFill("solid", fgColor="FF00FF")   # > 5 min
+    bright_red   = PatternFill("solid", fgColor="FF0000")   # > 10 min
+
     title_font = Font(bold=True, size=13, color="1F4E79")
     section_font = Font(bold=True, size=11, color="2F5496")
 
@@ -390,7 +397,7 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
     ws2["A2"] = (
         "Green=Connected, Red=Failed. "
         "Unusual Calling Time = free gap BEFORE this call (outside breaks). "
-        "Orange/Red highlight when free time exists outside breaks."
+        "Colors: Yellow(<3min) | Soft Pink(>3min) | Magenta(>5min) | Bright Red(>10min)"
     )
     ws2["A2"].font = Font(italic=True, size=9)
     ws2.merge_cells("A2:Q2")
@@ -421,11 +428,16 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
                 cell.fill = red
             elif (r_idx + 5) % 2 == 0:
                 cell.fill = alt
+            # Unusual Calling Time highlight (only these two columns)
             if col in ("Unusual Calling Time", "Unusual Calling Time (sec)") and unusual_sec > 0:
-                if unusual_sec > 600:
-                    cell.fill = red
-                else:
-                    cell.fill = orange
+                if unusual_sec > 600:          # > 10 minutes
+                    cell.fill = bright_red
+                elif unusual_sec > 300:        # > 5 minutes
+                    cell.fill = magenta
+                elif unusual_sec > 180:        # > 3 minutes
+                    cell.fill = soft_pink
+                else:                          # < 3 minutes (but > 0)
+                    cell.fill = yellow_light
     auto_width(ws2, max_w=18)
     ws2.freeze_panes = "D5"
 
@@ -501,7 +513,12 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
         "  3. Multi-Attempt Numbers – numbers contacted 2+ times",
         "  4. Definitions",
         "",
-        "COLORS: Green=Connected | Red=Failed or high unusual | Orange=some unusual free time | Yellow=5+ attempts",
+        "COLORS (All Calls Detail - Unusual Calling Time):",
+        "  • Light Yellow (#FFF2CC) = less than 3 minutes",
+        "  • Soft Pink (#E8A0A8)    = greater than 3 minutes",
+        "  • Magenta (#FF00FF)      = greater than 5 minutes",
+        "  • Bright Red (#FF0000)   = greater than 10 minutes",
+        "  Green=Connected | Red=Failed | Yellow=5+ attempts (Multi sheet)",
     ]
     for i, line in enumerate(notes, 3):
         ws4.cell(row=i, column=1, value=line)
@@ -523,7 +540,6 @@ st.set_page_config(page_title="Zoom Agent Performance", page_icon="📞", layout
 st.title("📞 Zoom Phone – Agent Performance Analyzer")
 st.caption(
     "Inbound + Outbound ·"
-  
 )
 
 with st.expander("Working hours & breaks (EST)", expanded=False):
