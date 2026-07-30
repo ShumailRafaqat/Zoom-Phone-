@@ -156,7 +156,9 @@ def load_csv(uploaded_file):
 
 
 def compute_unusual_gaps(agent_df):
-    """Unusual free time BEFORE each call = gap minus break overlap."""
+    """Unusual free time BEFORE each call = gap minus break overlap.
+    Returns list of unusual seconds before each call + total.
+    """
     agent_df = agent_df.sort_values("Start Time").copy().reset_index(drop=True)
     unusual_before = []
     total_unusual = 0.0
@@ -175,6 +177,50 @@ def compute_unusual_gaps(agent_df):
         unusual_before.append(unusual)
         total_unusual += unusual
     return unusual_before, total_unusual
+
+
+def analyze_unusual_gaps(agent_df):
+    """Detailed unusual gap analysis for Agent Summary.
+    Returns total, counts of significant gaps, and longest gap info.
+    """
+    agent_df = agent_df.sort_values("Start Time").copy().reset_index(drop=True)
+    total_unusual = 0.0
+    gaps_gt_3 = 0
+    gaps_gt_5 = 0
+    gaps_gt_10 = 0
+    longest = 0.0
+    longest_timing = "—"
+
+    for i in range(1, len(agent_df)):
+        prev_end = agent_df.iloc[i - 1]["end_time"]
+        this_start = agent_df.iloc[i]["Start Time"]
+        gap = (this_start - prev_end).total_seconds()
+        if pd.isna(gap) or gap <= 0:
+            continue
+        break_ov = overlap_with_breaks(prev_end, this_start)
+        unusual = max(0.0, gap - break_ov)
+        total_unusual += unusual
+
+        if unusual > 180:
+            gaps_gt_3 += 1
+        if unusual > 300:
+            gaps_gt_5 += 1
+        if unusual > 600:
+            gaps_gt_10 += 1
+
+        if unusual > longest:
+            longest = unusual
+            # Full timing: previous call end – next call start
+            longest_timing = f"{prev_end.strftime('%H:%M')} – {this_start.strftime('%H:%M')}"
+
+    return {
+        "total_unusual": total_unusual,
+        "gaps_gt_3": gaps_gt_3,
+        "gaps_gt_5": gaps_gt_5,
+        "gaps_gt_10": gaps_gt_10,
+        "longest": longest,
+        "longest_timing": longest_timing,
+    }
 
 
 def build_all_calls(df):
@@ -237,8 +283,10 @@ def build_daily_summary(df):
                 ad.loc[ad["is_connected"], "Other Phone"].replace("", np.nan).nunique()
             )
             total_talk = int(ad["talk_sec"].sum())
-            _, total_unusual = compute_unusual_gaps(ad)
             multi_nums = int((ad.groupby("Other Phone").size() > 1).sum()) if len(ad) else 0
+
+            # Detailed unusual gap analysis
+            analysis = analyze_unusual_gaps(ad)
 
             rows.append(
                 {
@@ -255,8 +303,13 @@ def build_daily_summary(df):
                     "Numbers with >1 Call": multi_nums,
                     "Total Talk Time": sec_to_hms(total_talk),
                     "Total Talk (sec)": total_talk,
-                    "Unusual Calling Time": sec_to_hms(total_unusual),
-                    "Unusual Calling Time (sec)": int(total_unusual),
+                    "Unusual Calling Time": sec_to_hms(analysis["total_unusual"]),
+                    "Unusual Calling Time (sec)": int(analysis["total_unusual"]),
+                    "Gaps >3 min": analysis["gaps_gt_3"],
+                    "Gaps >5 min": analysis["gaps_gt_5"],
+                    "Gaps >10 min": analysis["gaps_gt_10"],
+                    "Longest Gap": sec_to_hms(analysis["longest"]) if analysis["longest"] > 0 else "—",
+                    "Longest Gap Timing": analysis["longest_timing"],
                     "First Call": ad["Start Time"].min().strftime("%H:%M:%S"),
                     "Last Call": ad["Start Time"].max().strftime("%H:%M:%S"),
                 }
@@ -349,25 +402,29 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
     ws1.title = "Agent Summary"
     ws1["A1"] = "Agent Summary (Inbound + Outbound) — Times in EST"
     ws1["A1"].font = title_font
-    ws1.merge_cells("A1:P1")
+    ws1.merge_cells("A1:U1")
     ws1["A2"] = (
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | "
         "Log: EST/EDT | Working EST 10:00–18:00 | Breaks EST 12:30–12:50 & 15:00–15:30 "
         "(= PKT 19:00–03:00 / 21:30–21:50 / 00:00–00:30)"
     )
     ws1["A2"].font = Font(italic=True, size=9)
-    ws1.merge_cells("A2:P2")
+    ws1.merge_cells("A2:U2")
     ws1["A3"] = (
         "Unusual Calling Time = free time with NO call activity, AFTER removing official breaks. "
-        "Any free gap outside breaks is tracked (even a few seconds)."
+        "Gaps >3/5/10 min = how many times agent was free that long. "
+        "Longest Gap Timing = previous call end – next call start (when biggest free gap happened)."
     )
     ws1["A3"].font = Font(size=9, color="666666")
-    ws1.merge_cells("A3:P3")
+    ws1.merge_cells("A3:U3")
 
     sum_cols = [
         "Agent", "Date", "Total Calls", "Outbound", "Inbound", "Connected", "Failed/Canceled",
         "Connect Rate %", "Unique Numbers", "Numbers Attended (Connected)", "Numbers with >1 Call",
-        "Total Talk Time", "Unusual Calling Time", "First Call", "Last Call",
+        "Total Talk Time", "Unusual Calling Time",
+        "Gaps >3 min", "Gaps >5 min", "Gaps >10 min",
+        "Longest Gap", "Longest Gap Timing",
+        "First Call", "Last Call",
     ]
     for c, h in enumerate(sum_cols, 1):
         ws1.cell(row=5, column=c, value=h)
@@ -382,10 +439,18 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
             cell.alignment = Alignment(horizontal="center", wrap_text=True)
             if r_idx % 2 == 0:
                 cell.fill = alt
+            # Highlight high unusual time
             if sum_cols[c - 1] == "Unusual Calling Time" and row["Unusual Calling Time (sec)"] > 1800:
                 cell.fill = red
             elif sum_cols[c - 1] == "Unusual Calling Time" and row["Unusual Calling Time (sec)"] > 600:
                 cell.fill = yellow
+            # Highlight high gap counts
+            if sum_cols[c - 1] == "Gaps >10 min" and row["Gaps >10 min"] >= 1:
+                cell.fill = bright_red
+            elif sum_cols[c - 1] == "Gaps >5 min" and row["Gaps >5 min"] >= 2:
+                cell.fill = magenta
+            elif sum_cols[c - 1] == "Gaps >3 min" and row["Gaps >3 min"] >= 3:
+                cell.fill = soft_pink
     auto_width(ws1)
     ws1.freeze_panes = "C6"
 
@@ -497,9 +562,17 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
         "UNUSUAL CALLING TIME",
         "  • Free time when agent had NO call activity (no inbound, no outbound).",
         "  • Official break windows are EXCLUDED (not counted as unusual).",
-        "  • Even short free gaps (seconds) outside breaks are counted and highlighted.",
+        "  • Even short free gaps (seconds) outside breaks are counted in total.",
         "  • On All Calls Detail: Unusual Calling Time on a row = free gap BEFORE that call.",
         "  • On Agent Summary: total unusual free time for that agent that day.",
+        "",
+        "AGENT SUMMARY – NEW INSIGHT COLUMNS",
+        "  • Gaps >3 min  = how many times agent was free more than 3 minutes",
+        "  • Gaps >5 min  = how many times agent was free more than 5 minutes",
+        "  • Gaps >10 min = how many times agent was free more than 10 minutes",
+        "  • Longest Gap  = the single biggest free gap of the day",
+        "  • Longest Gap Timing = previous call end time – next call start time (when biggest gap happened)",
+        "  → One view se clear: agent ne kab aur kitna time waste kiya.",
         "",
         "OTHER METRICS",
         "  • Talk Time = Duration of Connected / Answered calls only.",
@@ -508,7 +581,7 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
         "  • Attempt # = running count of contacts with that number by this agent.",
         "",
         "SHEETS",
-        "  1. Agent Summary – daily totals per agent",
+        "  1. Agent Summary – daily totals + gap insights per agent",
         "  2. All Calls Detail – every inbound + outbound call with gaps & unusual time",
         "  3. Multi-Attempt Numbers – numbers contacted 2+ times",
         "  4. Definitions",
@@ -522,7 +595,7 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
     ]
     for i, line in enumerate(notes, 3):
         ws4.cell(row=i, column=1, value=line)
-        if any(line.startswith(x) for x in ("TIMEZONE", "UNUSUAL", "OTHER", "SHEETS", "COLORS")):
+        if any(line.startswith(x) for x in ("TIMEZONE", "UNUSUAL", "AGENT SUMMARY", "OTHER", "SHEETS", "COLORS")):
             ws4.cell(row=i, column=1).font = section_font
     ws4.column_dimensions["A"].width = 110
 
@@ -578,6 +651,8 @@ if uploaded is not None:
             preview = [
                 "Agent", "Date", "Total Calls", "Outbound", "Inbound", "Connected",
                 "Unique Numbers", "Total Talk Time", "Unusual Calling Time",
+                "Gaps >3 min", "Gaps >5 min", "Gaps >10 min",
+                "Longest Gap", "Longest Gap Timing",
             ]
             st.dataframe(daily_df[preview], use_container_width=True)
 
