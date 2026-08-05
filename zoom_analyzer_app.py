@@ -6,6 +6,7 @@ Zoom Phone Agent Performance Analyzer
 - All times in EST (as Zoom log)
 - Breaks converted from PKT → EST
 - Unusual calling time = free time outside breaks (no call activity)
+- Calls after 15:00 EST are ignored
 
 Run:  streamlit run zoom_analyzer_app.py
 pip install streamlit pandas openpyxl
@@ -42,6 +43,9 @@ KNOWN_AGENTS = {
 # Working PKT 19:00–03:00 → EST 10:00–18:00
 BREAK1_START, BREAK1_END = time(12, 30), time(12, 50)
 BREAK2_START, BREAK2_END = time(15, 0), time(15, 30)
+
+# Cut-off: calls starting at or after 15:00 EST are ignored
+CUTOFF_TIME = time(15, 0)
 
 # ============================================================
 # HELPERS
@@ -120,6 +124,10 @@ def load_csv(uploaded_file):
         df["Wait_sec"] = df["Wait Time"].apply(parse_duration).fillna(0).astype(int)
     else:
         df["Wait_sec"] = 0
+
+    # ========== ONLY CHANGE: ignore calls starting at/after 15:00 EST ==========
+    df = df[df["Start Time"].dt.time < CUTOFF_TIME].copy()
+    # ==========================================================================
 
     df["Agent"] = df.apply(resolve_agent, axis=1)
     df = df[df["Agent"].notna()].copy()
@@ -400,12 +408,12 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
     # ========== 1. Agent Summary ==========
     ws1 = wb.active
     ws1.title = "Agent Summary"
-    ws1["A1"] = "Agent Summary (Inbound + Outbound) — Times in EST"
+    ws1["A1"] = "Agent Summary (Inbound + Outbound) — Times in EST | Calls after 15:00 ignored"
     ws1["A1"].font = title_font
     ws1.merge_cells("A1:U1")
     ws1["A2"] = (
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | "
-        "Log: EST/EDT | Working EST 10:00–18:00 | Breaks EST 12:30–12:50 & 15:00–15:30 "
+        "Log: EST/EDT | Working EST 10:00–15:00 (cutoff) | Breaks EST 12:30–12:50 & 15:00–15:30 "
         "(= PKT 19:00–03:00 / 21:30–21:50 / 00:00–00:30)"
     )
     ws1["A2"].font = Font(italic=True, size=9)
@@ -413,7 +421,8 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
     ws1["A3"] = (
         "Unusual Calling Time = free time with NO call activity, AFTER removing official breaks. "
         "Gaps >3/5/10 min = how many times agent was free that long. "
-        "Longest Gap Timing = previous call end – next call start (when biggest free gap happened)."
+        "Longest Gap Timing = previous call end – next call start (when biggest free gap happened). "
+        "NOTE: Any call starting at/after 15:00 EST is completely ignored."
     )
     ws1["A3"].font = Font(size=9, color="666666")
     ws1.merge_cells("A3:U3")
@@ -456,7 +465,7 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
 
     # ========== 2. All Calls Detail ==========
     ws2 = wb.create_sheet("All Calls Detail")
-    ws2["A1"] = "All Calls Detail — Inbound + Outbound (EST)"
+    ws2["A1"] = "All Calls Detail — Inbound + Outbound (EST) | Calls after 15:00 ignored"
     ws2["A1"].font = title_font
     ws2.merge_cells("A1:Q1")
     ws2["A2"] = (
@@ -555,9 +564,13 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
         "",
         "TIMEZONE",
         "  • All call times shown in EST/EDT (same as Zoom Phone log).",
-        "  • Working hours (PKT 19:00–03:00) = EST 10:00–18:00",
+        "  • Working hours considered: EST 10:00–15:00 (calls after 15:00 are ignored)",
         "  • Break 1 (PKT 21:30–21:50) = EST 12:30–12:50",
         "  • Break 2 (PKT 00:00–00:30) = EST 15:00–15:30",
+        "",
+        "CUT-OFF RULE",
+        "  • Any call whose Start Time is 15:00 EST or later is completely ignored.",
+        "  • No analysis, no unusual time, no summary — simply removed.",
         "",
         "UNUSUAL CALLING TIME",
         "  • Free time when agent had NO call activity (no inbound, no outbound).",
@@ -595,7 +608,7 @@ def write_report(daily_df, multi, all_calls_df) -> bytes:
     ]
     for i, line in enumerate(notes, 3):
         ws4.cell(row=i, column=1, value=line)
-        if any(line.startswith(x) for x in ("TIMEZONE", "UNUSUAL", "AGENT SUMMARY", "OTHER", "SHEETS", "COLORS")):
+        if any(line.startswith(x) for x in ("TIMEZONE", "CUT-OFF", "UNUSUAL", "AGENT SUMMARY", "OTHER", "SHEETS", "COLORS")):
             ws4.cell(row=i, column=1).font = section_font
     ws4.column_dimensions["A"].width = 110
 
@@ -612,14 +625,14 @@ st.set_page_config(page_title="Zoom Agent Performance", page_icon="📞", layout
 
 st.title("📞 Zoom Phone – Agent Performance Analyzer")
 st.caption(
-    "Inbound + Outbound ·"
+    "Inbound + Outbound · Calls after 15:00 EST ignored"
 )
 
 with st.expander("Working hours & breaks (EST)", expanded=False):
     st.markdown(
         """
         - **Zoom log timezone:** EST/EDT (all call times shown as-is)  
-        - **Working hours:** PKT 19:00–03:00 → **EST 10:00–18:00**  
+        - **Working hours considered:** EST 10:00–15:00 (**calls starting at/after 15:00 are ignored**)  
         - **Break 1:** PKT 21:30–21:50 → **EST 12:30–12:50**  
         - **Break 2:** PKT 00:00–00:30 → **EST 15:00–15:30**  
         - **Unusual Calling Time:** agent free (no inbound/outbound) outside breaks — highlighted  
@@ -633,7 +646,7 @@ if uploaded is not None:
         try:
             df = load_csv(uploaded)
             if len(df) == 0:
-                st.error("No calls found for known agents (inbound or outbound).")
+                st.error("No calls found for known agents (inbound or outbound) before 15:00 EST.")
                 st.stop()
 
             daily_df = build_daily_summary(df)
