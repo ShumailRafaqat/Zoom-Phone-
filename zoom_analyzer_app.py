@@ -35,6 +35,8 @@ KNOWN_AGENTS = {
     "Gaby Alex",
     "Ayan Ali",
     "Jessi brown",
+    "Ayesha Asif",     
+    "Annas Khan",
 }
 
 # Breaks in EST (converted from PKT)
